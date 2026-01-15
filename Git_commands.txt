@@ -1,0 +1,17 @@
+
+1. 💻 When you work on homework
+git status
+git add .
+git commit -m "HW1: implemented XYZ"
+git push
+
+2. 🔄 When instructors update the homework
+git fetch upstream
+git merge upstream/main
+
+
+
+push to the course repo is disabled and push to my repo is 
+enabled and you can merge following steps in 2.
+
+check status using - git remote -v
