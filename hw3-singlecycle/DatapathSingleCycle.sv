@@ -30,6 +30,22 @@ module RegFile (
 
   // TODO: your code here
 
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      // initialize all registers to zero on reset
+      for (int i = 0; i < NumRegs; i = i + 1) begin
+        regs[i] <= '0;
+      end
+    end else begin
+      if (we && (rd != 5'd0)) begin
+        regs[rd] <= rd_data;
+      end
+    end
+  end
+
+  assign rs1_data = (rs1 == 5'd0) ? '0 : regs[rs1];
+  assign rs2_data = (rs2 == 5'd0) ? '0 : regs[rs2]; 
+
 endmodule
 
 module DatapathSingleCycle (

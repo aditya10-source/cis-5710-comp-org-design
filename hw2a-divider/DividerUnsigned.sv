@@ -13,6 +13,32 @@ module DividerUnsigned (
 
     // TODO: your code here
 
+    wire [31:0] remainder [0:32];
+    wire [31:0] quotient  [0:32];
+    wire [31:0] dividend  [0:32];
+
+    assign dividend[0] = i_dividend;
+    assign quotient[0]  = 32'd0;
+    assign remainder[0] = 32'd0;
+
+    genvar i;
+    generate
+        for (i = 0; i < 32; i = i + 1) begin : divider_loop
+            DividerOneIter divider_one_iter (
+                .i_dividend (dividend[i]),
+                .i_divisor (i_divisor),
+                .i_remainder (remainder[i]),
+                .i_quotient (quotient[i]),
+                .o_dividend (dividend[i+1]),
+                .o_remainder (remainder[i+1]),
+                .o_quotient (quotient[i+1])
+            );
+        end
+    endgenerate
+
+    assign o_remainder = remainder[32];
+    assign o_quotient  = quotient[32];  
+
 endmodule
 
 
@@ -39,5 +65,13 @@ module DividerOneIter (
     */
 
     // TODO: your code here
+
+
+    wire [31:0]shifted_remainder;
+
+    assign shifted_remainder = (i_remainder << 1) | ((i_dividend >> 31) & 32'h1);
+    assign o_quotient = (shifted_remainder < i_divisor) ? (i_quotient << 1) : ((i_quotient << 1) | 32'h1);
+    assign o_remainder = (shifted_remainder < i_divisor) ? shifted_remainder : (shifted_remainder - i_divisor);
+    assign o_dividend = i_dividend << 1;
 
 endmodule
