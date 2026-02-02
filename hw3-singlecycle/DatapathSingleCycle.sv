@@ -173,6 +173,12 @@ module DatapathSingleCycle (
   wire insn_ecall = insn_opcode == OpEnviron && insn_from_imem[31:7] == 25'd0;
   wire insn_fence = insn_opcode == OpMiscMem;
 
+    // traces declaration
+  logic [`REG_SIZE] completed_pc;
+  logic [`INSN_SIZE] completed_insn;
+  logic [`REG_SIZE] pcNext, pcCurrent;
+
+
   // this code is only for simulation, not synthesis
   `ifndef SYNTHESIS
   `include "RvDisassembler.sv"
@@ -188,16 +194,16 @@ module DatapathSingleCycle (
   end
   `endif
 
-  // program counter
-  logic [`REG_SIZE] pcNext, pcCurrent;
-  always @(posedge clk) begin
-    if (rst) begin
-      pcCurrent <= 32'd0;
-    end else begin
-      pcCurrent <= pcNext;
-    end
-  end
-  assign pc_to_imem = pcCurrent;
+  // // program counter
+  // logic [`REG_SIZE] pcNext, pcCurrent;
+  // always @(posedge clk) begin
+  //   if (rst) begin
+  //     pcCurrent <= 32'd0;
+  //   end else begin
+  //     pcCurrent <= pcNext;
+  //   end
+  // end
+  // assign pc_to_imem = pcCurrent;
 
   // cycle/insn_from_imem counters
   logic [`REG_SIZE] cycles_current, num_insns_current;
@@ -213,35 +219,261 @@ module DatapathSingleCycle (
     end
   end
 
+// NOTE: Carry LookAhead Adder for addi 
+// Added by Aditya Agarwal
+  logic [`REG_SIZE] cla_addi_sum;
+  logic cla_addi_cout;
+
+  CarryLookaheadAdder cla_addi (
+    .a(rs1_data),
+    .b(imm_i_sext),
+    .cin(1'b0),
+    .sum(cla_addi_sum)
+    /* .cout(cla_addi_cout) */
+  );
+// CLA for addi ends here
+// NOTE: Carry LookAhead Adder for addition and subtraction
+  wire [`REG_SIZE] cla_add_sum;
+  wire [`REG_SIZE] cla_sub_sum;
+  wire cla_add_cout, cla_sub_cout;
+
+  CarryLookaheadAdder cla_add (
+    .a(rs1_data),
+    .b(rs2_data),
+    .cin(1'b0),
+    .sum(cla_add_sum)
+   // .cout(cla_add_cout)
+  );
+
+  CarryLookaheadAdder cla_sub (
+    .a(rs1_data),
+    .b(~rs2_data),
+    .cin(1'b1),
+    .sum(cla_sub_sum)
+    //.cout(cla_sub_cout)
+  );
+// CLA for addition and subtraction ends here
+
+
   // NOTE: don't rename your RegFile instance as the tests expect it to be `rf`
   // TODO: you will need to edit the port connections, however.
   wire [`REG_SIZE] rs1_data;
   wire [`REG_SIZE] rs2_data;
+  logic reg_we;
+  logic [`REG_SIZE] reg_wdata;
   RegFile rf (
     .clk(clk),
     .rst(rst),
-    .we(1'b0),
-    .rd(0),
-    .rd_data(0),
-    .rs1(0),
-    .rs2(0),
+    .we(reg_we),
+    .rd(insn_rd),
+    .rd_data(reg_wdata),
+    .rs1(insn_rs1),
+    .rs2(insn_rs2),
     .rs1_data(rs1_data),
     .rs2_data(rs2_data));
 
   logic illegal_insn;
 
   always_comb begin
+    // defaults (IMPORTANT)
     illegal_insn = 1'b0;
+    pcNext    = pcCurrent + 32'd4;
+    reg_we    = 1'b0;
+    reg_wdata = 32'b0;
+    halt      = 1'b0;
 
     case (insn_opcode)
       OpLui: begin
         // TODO: start here by implementing lui
+        reg_we = 1'b1;
+        reg_wdata = {insn_from_imem[31:12], 12'b0};
       end
+      OpAuipc: begin
+        reg_we = 1'b1;
+        reg_wdata = pcCurrent + {insn_from_imem[31:12], 12'b0};
+      end
+      // I-type Instructions addi to srai
+      OpRegImm: begin
+        if(insn_addi) begin
+          reg_we = 1'b1;
+          reg_wdata = cla_addi_sum;
+        end else if (insn_slti) begin
+          reg_we = 1'b1;
+          reg_wdata = ($signed(rs1_data) < $signed(imm_i_sext)) ? 32'd1 : 32'd0;
+        end else if (insn_sltiu) begin
+          reg_we = 1'b1;
+          reg_wdata = (rs1_data < imm_i_sext) ? 32'd1 : 32'd0;
+        end else if (insn_xori) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data ^ imm_i_sext;
+        end else if (insn_ori) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data | imm_i_sext;
+        end else if (insn_andi) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data & imm_i_sext;
+        end else if (insn_slli) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data << imm_shamt;
+        end else if (insn_srli) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data >> imm_shamt;
+        end else if (insn_srai) begin
+          reg_we = 1'b1;
+          reg_wdata = $signed(rs1_data) >>> imm_shamt;
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+      //I-type instructions over HW 3A
+
+      //R-type instructions add to and
+      OpRegReg: begin
+        if (insn_add) begin
+          reg_we = 1'b1; 
+          reg_wdata = cla_add_sum;
+        end else if (insn_sub) begin
+          reg_we = 1'b1;
+          reg_wdata = cla_sub_sum;
+        end else if (insn_sll) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data << rs2_data[4:0];
+        end else if (insn_slt) begin
+          reg_we = 1'b1;
+          reg_wdata = ($signed(rs1_data) < $signed(rs2_data)) ? 32'd1 : 32'd0;
+        end else if (insn_sltu) begin
+          reg_we = 1'b1;
+          reg_wdata = (rs1_data < rs2_data) ? 32'd1 : 32'd0;
+        end else if (insn_xor) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data ^ rs2_data;
+        end else if (insn_srl) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data >> rs2_data[4:0];
+        end else if (insn_sra) begin
+          reg_we = 1'b1;
+          reg_wdata = $signed(rs1_data) >>> rs2_data[4:0];
+        end else if (insn_or) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data | rs2_data;
+        end else if (insn_and) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data & rs2_data;
+        end
+        else begin
+          illegal_insn = 1'b1;
+        end
+      end
+      //R-type instructions over HW 3A
+
+      //B-type instructions
+      OpBranch: begin
+        if (insn_beq) begin 
+          if (rs1_data == rs2_data) begin
+            pcNext = pcCurrent + imm_b_sext;
+          end
+        end else if (insn_bne) begin
+          if (rs1_data != rs2_data) begin
+            pcNext = pcCurrent + imm_b_sext;
+          end
+        end else if (insn_blt) begin
+          if ($signed(rs1_data) < $signed(rs2_data)) begin
+            pcNext = pcCurrent + imm_b_sext;
+          end
+        end else if (insn_bge) begin
+          if ($signed(rs1_data) >= $signed(rs2_data)) begin
+            pcNext = pcCurrent + imm_b_sext;
+          end
+        end else if (insn_bltu) begin
+          if (rs1_data < rs2_data) begin
+            pcNext = pcCurrent + imm_b_sext;
+          end
+        end else if (insn_bgeu) begin
+          if (rs1_data >= rs2_data) begin
+            pcNext = pcCurrent + imm_b_sext;
+          end
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+      //B-type instructions over
+
+      // Ecall instruction
+      OpEnviron: begin
+        if (insn_ecall) begin
+          halt = 1'b1;
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+      // Ecall instruction over
+
+      //J-type instruction jal and jalr
+      OpJal: begin
+        reg_we = 1'b1;
+        reg_wdata = pcCurrent + 32'd4;
+        pcNext = pcCurrent + imm_j_sext;
+      end
+      OpJalr: begin
+        reg_we = 1'b1;
+        reg_wdata = pcCurrent + 32'd4;
+        pcNext = (rs1_data + imm_i_sext) & ~32'd1;
+      end
+      //J-type instruction over
+
+      
       default: begin
         illegal_insn = 1'b1;
       end
     endcase
   end
+
+
+// updated pc and trace registers
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      pcCurrent      <= 32'd0;
+      completed_pc   <= 32'd0;
+      completed_insn <= 32'd0;
+    end else begin
+      completed_pc   <= pcCurrent;
+      completed_insn <= insn_from_imem;
+      pcCurrent      <= pcNext;
+    end
+  end
+
+
+
+  assign pc_to_imem = pcCurrent;
+
+  // trace outputs: combinational view of the *current* cycle’s instruction
+  assign trace_completed_insn = insn_from_imem;
+  assign trace_completed_pc = pcCurrent;
+  assign trace_completed_cycle_status = CYCLE_NO_STALL;
+
+  
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      pcCurrent      <= 32'd0;
+      completed_pc   <= 32'd0;
+      completed_insn <= 32'd0;
+    end else begin
+      completed_pc   <= pcCurrent;
+      completed_insn <= insn_from_imem;
+      pcCurrent      <= pcNext;
+    end
+  end
+
+
+  // for now
+  //assign halt = 1'b0;
+
+  // ignore dmem for now
+  assign addr_to_dmem = 32'b0;
+  assign store_data_to_dmem = 32'b0;
+  assign store_we_to_dmem = 4'b0000;
+
 
 endmodule
 
