@@ -429,21 +429,6 @@ module DatapathSingleCycle (
   end
 
 
-// updated pc and trace registers
-
-  always_ff @(posedge clk) begin
-    if (rst) begin
-      pcCurrent      <= 32'd0;
-      completed_pc   <= 32'd0;
-      completed_insn <= 32'd0;
-    end else begin
-      completed_pc   <= pcCurrent;
-      completed_insn <= insn_from_imem;
-      pcCurrent      <= pcNext;
-    end
-  end
-
-
 
   assign pc_to_imem = pcCurrent;
 
@@ -453,6 +438,8 @@ module DatapathSingleCycle (
   assign trace_completed_cycle_status = CYCLE_NO_STALL;
 
   
+  // updated pc and trace registers
+
   always_ff @(posedge clk) begin
     if (rst) begin
       pcCurrent      <= 32'd0;

@@ -530,17 +530,6 @@ module DatapathSingleCycle (
 			default: illegal_insn = 1'b1;
 		endcase
 	end
-	always @(posedge clk)
-		if (rst) begin
-			pcCurrent <= 32'd0;
-			completed_pc <= 32'd0;
-			completed_insn <= 32'd0;
-		end
-		else begin
-			completed_pc <= pcCurrent;
-			completed_insn <= insn_from_imem;
-			pcCurrent <= pcNext;
-		end
 	assign pc_to_imem = pcCurrent;
 	assign trace_completed_insn = insn_from_imem;
 	assign trace_completed_pc = pcCurrent;
