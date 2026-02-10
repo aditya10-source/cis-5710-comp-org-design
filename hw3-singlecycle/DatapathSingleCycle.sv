@@ -254,6 +254,24 @@ module DatapathSingleCycle (
   );
 // CLA for addition and subtraction ends here
 
+//Divider for division and remainder instructions
+  logic [`REG_SIZE] div_quotient, div_remainder;
+  logic [`REG_SIZE] div_dividend, div_divisor;
+
+  // We will use the same divider for both signed and unsigned division/remainder, but we need to convert the inputs to unsigned if it's a signed division/remainder instruction.
+  // For signed division/remainder, we can take the absolute values of the dividend and divisor, perform unsigned division, and then adjust the signs of the quotient and remainder at the end.
+  assign div_dividend = (insn_div || insn_rem) ? ((rs1_data[31] ? (~rs1_data + 1) : rs1_data)) : rs1_data;
+  assign div_divisor = (insn_div || insn_rem) ? ((rs2_data[31] ? (~rs2_data + 1) : rs2_data)) : rs2_data;
+
+  DividerUnsigned divider (
+    .i_dividend(div_dividend),
+    .i_divisor(div_divisor),
+    .o_quotient(div_quotient),
+    .o_remainder(div_remainder)
+  );
+
+
+// Divider for division and remainder instructions ends here
 
   // NOTE: don't rename your RegFile instance as the tests expect it to be `rf`
   // TODO: you will need to edit the port connections, however.
@@ -273,6 +291,10 @@ module DatapathSingleCycle (
     .rs2_data(rs2_data));
 
   logic illegal_insn;
+  logic [31:0] eff_addr_i, eff_addr_s;
+  logic [1:0]  byte_offset;
+  logic [63:0] mul_result;
+
 
   always_comb begin
     // defaults (IMPORTANT)
@@ -281,6 +303,15 @@ module DatapathSingleCycle (
     reg_we    = 1'b0;
     reg_wdata = 32'b0;
     halt      = 1'b0;
+    addr_to_dmem = 32'b0;
+    store_data_to_dmem = 32'b0;
+    store_we_to_dmem = 4'b0000;
+
+    eff_addr_i    = rs1_data + imm_i_sext;
+    eff_addr_s    = rs1_data + imm_s_sext;
+    byte_offset = 2'b00;
+    mul_result = 64'b0;
+
 
     case (insn_opcode)
       OpLui: begin
@@ -360,11 +391,144 @@ module DatapathSingleCycle (
           reg_we = 1'b1;
           reg_wdata = rs1_data & rs2_data;
         end
+        // mul and div instructions
+        else if (insn_mul) begin
+          reg_we = 1'b1;
+          reg_wdata = rs1_data * rs2_data;
+        end else if (insn_mulh) begin
+          reg_we = 1'b1;
+          mul_result = $signed(rs1_data) * $signed(rs2_data);
+          reg_wdata = mul_result[63:32];
+        end else if (insn_mulhsu) begin
+          reg_we = 1'b1;
+          mul_result = $signed({{32{rs1_data[31]}}, rs1_data}) * $signed({32'b0, rs2_data});    //Basically extending the MSB of rs2_data with 0s to make it unsigned.
+          reg_wdata  = mul_result[63:32];
+        end else if (insn_mulhu) begin
+          reg_we = 1'b1;
+          mul_result = $unsigned(rs1_data) * $unsigned(rs2_data); 
+          reg_wdata = mul_result[63:32];
+        end else if (insn_div) begin
+          reg_we = 1'b1;
+          if (rs2_data == 32'd0) begin
+            reg_wdata = 32'hFFFF_FFFF;
+          end else if (rs1_data == 32'h8000_0000 &&
+              rs2_data == 32'hFFFF_FFFF) begin
+            // INT_MIN / -1 overflow case
+            reg_wdata = 32'h8000_0000;
+          end else begin
+            reg_wdata = (insn_div) ? ((rs1_data[31] ^ rs2_data[31]) ? (~div_quotient + 1) : div_quotient) : 32'b0;
+          end
+        end else if (insn_divu) begin
+          reg_we = 1'b1;
+          if (rs2_data == 32'd0) begin
+            reg_wdata = 32'hFFFF_FFFF;
+          end else begin
+            reg_wdata = div_quotient;
+          end
+        end else if (insn_rem) begin
+          reg_we = 1'b1;
+          if (rs2_data == 32'd0) begin
+            reg_wdata = rs1_data;
+          end else begin
+            reg_wdata = (insn_rem) ? (rs1_data[31] ? (~div_remainder + 1) : div_remainder) : 32'b0;
+          end
+        end else if (insn_remu) begin
+          reg_we = 1'b1;
+          if (rs2_data == 32'd0) begin
+            reg_wdata = rs1_data;
+          end else begin
+            reg_wdata = div_remainder;
+          end
+        end
         else begin
           illegal_insn = 1'b1;
         end
       end
       //R-type instructions over HW 3A
+      //I-type load instructions
+      OpLoad: begin
+        reg_we = 1'b1;
+        byte_offset = eff_addr_i[1:0];
+        addr_to_dmem = eff_addr_i & ~32'd3; // word-align the address
+        if (insn_lb) begin
+          case (byte_offset) 
+            2'b00: reg_wdata = {{24{load_data_from_dmem[7]}}, load_data_from_dmem[7:0]};
+            2'b01: reg_wdata = {{24{load_data_from_dmem[15]}}, load_data_from_dmem[15:8]};
+            2'b10: reg_wdata = {{24{load_data_from_dmem[23]}}, load_data_from_dmem[23:16]};
+            2'b11: reg_wdata = {{24{load_data_from_dmem[31]}}, load_data_from_dmem[31:24]};
+            default: illegal_insn = 1'b1; // unaligned byte load
+          endcase
+        end else if (insn_lh) begin
+          case (byte_offset) 
+            2'b00: reg_wdata = {{16{load_data_from_dmem[15]}}, load_data_from_dmem[15:0]};
+            2'b10: reg_wdata = {{16{load_data_from_dmem[31]}}, load_data_from_dmem[31:16]};
+            default: illegal_insn = 1'b1; // unaligned half-word load
+          endcase
+        end else if (insn_lw) begin
+          reg_wdata = load_data_from_dmem;
+        end else if (insn_lbu) begin
+          case (byte_offset) 
+            2'b00: reg_wdata = {24'b0, load_data_from_dmem[7:0]};
+            2'b01: reg_wdata = {24'b0, load_data_from_dmem[15:8]};
+            2'b10: reg_wdata = {24'b0, load_data_from_dmem[23:16]};
+            2'b11: reg_wdata = {24'b0, load_data_from_dmem[31:24]};
+            default: illegal_insn = 1'b1; // unaligned byte load
+          endcase
+        end else if (insn_lhu) begin
+          case (byte_offset) 
+            2'b00: reg_wdata = {16'b0, load_data_from_dmem[15:0]};
+            2'b10: reg_wdata = {16'b0, load_data_from_dmem[31:16]};
+            default: illegal_insn = 1'b1; // unaligned half-word load
+          endcase
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+      //I-type load instructions over
+      //S-type store instructions
+      OpStore: begin
+        byte_offset = eff_addr_s[1:0];
+        addr_to_dmem = eff_addr_s & ~32'd3; // word-align the address
+        if (insn_sb) begin
+          case (byte_offset) 
+            2'b00: begin
+              store_data_to_dmem = {24'b0, rs2_data[7:0]};
+              store_we_to_dmem = 4'b0001;
+            end
+            2'b01: begin
+              store_data_to_dmem = {16'b0, rs2_data[7:0], 8'b0};
+              store_we_to_dmem = 4'b0010;
+            end
+            2'b10: begin
+              store_data_to_dmem = {8'b0, rs2_data[7:0], 16'b0};
+              store_we_to_dmem = 4'b0100;
+            end
+            2'b11: begin
+              store_data_to_dmem = {rs2_data[7:0], 24'b0};
+              store_we_to_dmem = 4'b1000;
+            end
+            default: illegal_insn = 1'b1; // unaligned byte store
+          endcase
+        end else if (insn_sh) begin
+          case (byte_offset) 
+            2'b00: begin
+              store_data_to_dmem = {16'b0, rs2_data[15:0]};
+              store_we_to_dmem = 4'b0011;
+            end
+            2'b10: begin
+              store_data_to_dmem = {rs2_data[15:0], 16'b0};
+              store_we_to_dmem = 4'b1100;
+            end
+            default: illegal_insn = 1'b1; // unaligned half-word store
+          endcase
+        end else if (insn_sw) begin
+          store_data_to_dmem = rs2_data;
+          store_we_to_dmem = 4'b1111;
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+      //S-type store instructions over
 
       //B-type instructions
       OpBranch: begin
@@ -457,9 +621,9 @@ module DatapathSingleCycle (
   //assign halt = 1'b0;
 
   // ignore dmem for now
-  assign addr_to_dmem = 32'b0;
-  assign store_data_to_dmem = 32'b0;
-  assign store_we_to_dmem = 4'b0000;
+  // assign addr_to_dmem = 32'b0;
+  // assign store_data_to_dmem = 32'b0;
+  // assign store_we_to_dmem = 4'b0000;
 
 
 endmodule

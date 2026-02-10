@@ -47,6 +47,62 @@ module MyClockGen (
 		.LOCK(locked)
 	);
 endmodule
+module DividerUnsigned (
+	i_dividend,
+	i_divisor,
+	o_remainder,
+	o_quotient
+);
+	input wire [31:0] i_dividend;
+	input wire [31:0] i_divisor;
+	output wire [31:0] o_remainder;
+	output wire [31:0] o_quotient;
+	wire [31:0] remainder [0:32];
+	wire [31:0] quotient [0:32];
+	wire [31:0] dividend [0:32];
+	assign dividend[0] = i_dividend;
+	assign quotient[0] = 32'd0;
+	assign remainder[0] = 32'd0;
+	genvar _gv_i_1;
+	generate
+		for (_gv_i_1 = 0; _gv_i_1 < 32; _gv_i_1 = _gv_i_1 + 1) begin : divider_loop
+			localparam i = _gv_i_1;
+			DividerOneIter divider_one_iter(
+				.i_dividend(dividend[i]),
+				.i_divisor(i_divisor),
+				.i_remainder(remainder[i]),
+				.i_quotient(quotient[i]),
+				.o_dividend(dividend[i + 1]),
+				.o_remainder(remainder[i + 1]),
+				.o_quotient(quotient[i + 1])
+			);
+		end
+	endgenerate
+	assign o_remainder = remainder[32];
+	assign o_quotient = quotient[32];
+endmodule
+module DividerOneIter (
+	i_dividend,
+	i_divisor,
+	i_remainder,
+	i_quotient,
+	o_dividend,
+	o_remainder,
+	o_quotient
+);
+	input wire [31:0] i_dividend;
+	input wire [31:0] i_divisor;
+	input wire [31:0] i_remainder;
+	input wire [31:0] i_quotient;
+	output wire [31:0] o_dividend;
+	output wire [31:0] o_remainder;
+	output wire [31:0] o_quotient;
+	wire [31:0] shifted_remainder;
+	assign shifted_remainder = (i_remainder << 1) | ((i_dividend >> 31) & 32'h00000001);
+	assign o_quotient = (shifted_remainder < i_divisor ? i_quotient << 1 : (i_quotient << 1) | 32'h00000001);
+	assign o_remainder = (shifted_remainder < i_divisor ? shifted_remainder : shifted_remainder - i_divisor);
+	assign o_dividend = i_dividend << 1;
+endmodule
 module gp1 (
 	a,
 	b,
@@ -242,10 +298,10 @@ module DatapathSingleCycle (
 	output reg halt;
 	output wire [31:0] pc_to_imem;
 	input wire [31:0] insn_from_imem;
-	output wire [31:0] addr_to_dmem;
+	output reg [31:0] addr_to_dmem;
 	input wire [31:0] load_data_from_dmem;
-	output wire [31:0] store_data_to_dmem;
-	output wire [3:0] store_we_to_dmem;
+	output reg [31:0] store_data_to_dmem;
+	output reg [3:0] store_we_to_dmem;
 	output wire [31:0] trace_completed_pc;
 	output wire [31:0] trace_completed_insn;
 	output wire [31:0] trace_completed_cycle_status;
@@ -372,6 +428,18 @@ module DatapathSingleCycle (
 		.cin(1'b1),
 		.sum(cla_sub_sum)
 	);
+	wire [31:0] div_quotient;
+	wire [31:0] div_remainder;
+	wire [31:0] div_dividend;
+	wire [31:0] div_divisor;
+	assign div_dividend = (insn_div || insn_rem ? (rs1_data[31] ? ~rs1_data + 1 : rs1_data) : rs1_data);
+	assign div_divisor = (insn_div || insn_rem ? (rs2_data[31] ? ~rs2_data + 1 : rs2_data) : rs2_data);
+	DividerUnsigned divider(
+		.i_dividend(div_dividend),
+		.i_divisor(div_divisor),
+		.o_quotient(div_quotient),
+		.o_remainder(div_remainder)
+	);
 	reg reg_we;
 	reg [31:0] reg_wdata;
 	RegFile rf(
@@ -386,6 +454,10 @@ module DatapathSingleCycle (
 		.rs2_data(rs2_data)
 	);
 	reg illegal_insn;
+	reg [31:0] eff_addr_i;
+	reg [31:0] eff_addr_s;
+	reg [1:0] byte_offset;
+	reg [63:0] mul_result;
 	always @(*) begin
 		if (_sv2v_0)
 			;
@@ -394,6 +466,13 @@ module DatapathSingleCycle (
 		reg_we = 1'b0;
 		reg_wdata = 32'b00000000000000000000000000000000;
 		halt = 1'b0;
+		addr_to_dmem = 32'b00000000000000000000000000000000;
+		store_data_to_dmem = 32'b00000000000000000000000000000000;
+		store_we_to_dmem = 4'b0000;
+		eff_addr_i = rs1_data + imm_i_sext;
+		eff_addr_s = rs1_data + imm_s_sext;
+		byte_offset = 2'b00;
+		mul_result = 64'b0000000000000000000000000000000000000000000000000000000000000000;
 		case (insn_opcode)
 			OpLui: begin
 				reg_we = 1'b1;
@@ -483,8 +562,136 @@ module DatapathSingleCycle (
 					reg_we = 1'b1;
 					reg_wdata = rs1_data & rs2_data;
 				end
+				else if (insn_mul) begin
+					reg_we = 1'b1;
+					reg_wdata = rs1_data * rs2_data;
+				end
+				else if (insn_mulh) begin
+					reg_we = 1'b1;
+					mul_result = $signed(rs1_data) * $signed(rs2_data);
+					reg_wdata = mul_result[63:32];
+				end
+				else if (insn_mulhsu) begin
+					reg_we = 1'b1;
+					mul_result = $signed({{32 {rs1_data[31]}}, rs1_data}) * $signed({32'b00000000000000000000000000000000, rs2_data});
+					reg_wdata = mul_result[63:32];
+				end
+				else if (insn_mulhu) begin
+					reg_we = 1'b1;
+					mul_result = $unsigned(rs1_data) * $unsigned(rs2_data);
+					reg_wdata = mul_result[63:32];
+				end
+				else if (insn_div) begin
+					reg_we = 1'b1;
+					if (rs2_data == 32'd0)
+						reg_wdata = 32'hffffffff;
+					else if ((rs1_data == 32'h80000000) && (rs2_data == 32'hffffffff))
+						reg_wdata = 32'h80000000;
+					else
+						reg_wdata = (insn_div ? (rs1_data[31] ^ rs2_data[31] ? ~div_quotient + 1 : div_quotient) : 32'b00000000000000000000000000000000);
+				end
+				else if (insn_divu) begin
+					reg_we = 1'b1;
+					if (rs2_data == 32'd0)
+						reg_wdata = 32'hffffffff;
+					else
+						reg_wdata = div_quotient;
+				end
+				else if (insn_rem) begin
+					reg_we = 1'b1;
+					if (rs2_data == 32'd0)
+						reg_wdata = rs1_data;
+					else
+						reg_wdata = (insn_rem ? (rs1_data[31] ? ~div_remainder + 1 : div_remainder) : 32'b00000000000000000000000000000000);
+				end
+				else if (insn_remu) begin
+					reg_we = 1'b1;
+					if (rs2_data == 32'd0)
+						reg_wdata = rs1_data;
+					else
+						reg_wdata = div_remainder;
+				end
 				else
 					illegal_insn = 1'b1;
+			OpLoad: begin
+				reg_we = 1'b1;
+				byte_offset = eff_addr_i[1:0];
+				addr_to_dmem = eff_addr_i & ~32'd3;
+				if (insn_lb)
+					case (byte_offset)
+						2'b00: reg_wdata = {{24 {load_data_from_dmem[7]}}, load_data_from_dmem[7:0]};
+						2'b01: reg_wdata = {{24 {load_data_from_dmem[15]}}, load_data_from_dmem[15:8]};
+						2'b10: reg_wdata = {{24 {load_data_from_dmem[23]}}, load_data_from_dmem[23:16]};
+						2'b11: reg_wdata = {{24 {load_data_from_dmem[31]}}, load_data_from_dmem[31:24]};
+						default: illegal_insn = 1'b1;
+					endcase
+				else if (insn_lh)
+					case (byte_offset)
+						2'b00: reg_wdata = {{16 {load_data_from_dmem[15]}}, load_data_from_dmem[15:0]};
+						2'b10: reg_wdata = {{16 {load_data_from_dmem[31]}}, load_data_from_dmem[31:16]};
+						default: illegal_insn = 1'b1;
+					endcase
+				else if (insn_lw)
+					reg_wdata = load_data_from_dmem;
+				else if (insn_lbu)
+					case (byte_offset)
+						2'b00: reg_wdata = {24'b000000000000000000000000, load_data_from_dmem[7:0]};
+						2'b01: reg_wdata = {24'b000000000000000000000000, load_data_from_dmem[15:8]};
+						2'b10: reg_wdata = {24'b000000000000000000000000, load_data_from_dmem[23:16]};
+						2'b11: reg_wdata = {24'b000000000000000000000000, load_data_from_dmem[31:24]};
+						default: illegal_insn = 1'b1;
+					endcase
+				else if (insn_lhu)
+					case (byte_offset)
+						2'b00: reg_wdata = {16'b0000000000000000, load_data_from_dmem[15:0]};
+						2'b10: reg_wdata = {16'b0000000000000000, load_data_from_dmem[31:16]};
+						default: illegal_insn = 1'b1;
+					endcase
+				else
+					illegal_insn = 1'b1;
+			end
+			OpStore: begin
+				byte_offset = eff_addr_s[1:0];
+				addr_to_dmem = eff_addr_s & ~32'd3;
+				if (insn_sb)
+					case (byte_offset)
+						2'b00: begin
+							store_data_to_dmem = {24'b000000000000000000000000, rs2_data[7:0]};
+							store_we_to_dmem = 4'b0001;
+						end
+						2'b01: begin
+							store_data_to_dmem = {16'b0000000000000000, rs2_data[7:0], 8'b00000000};
+							store_we_to_dmem = 4'b0010;
+						end
+						2'b10: begin
+							store_data_to_dmem = {8'b00000000, rs2_data[7:0], 16'b0000000000000000};
+							store_we_to_dmem = 4'b0100;
+						end
+						2'b11: begin
+							store_data_to_dmem = {rs2_data[7:0], 24'b000000000000000000000000};
+							store_we_to_dmem = 4'b1000;
+						end
+						default: illegal_insn = 1'b1;
+					endcase
+				else if (insn_sh)
+					case (byte_offset)
+						2'b00: begin
+							store_data_to_dmem = {16'b0000000000000000, rs2_data[15:0]};
+							store_we_to_dmem = 4'b0011;
+						end
+						2'b10: begin
+							store_data_to_dmem = {rs2_data[15:0], 16'b0000000000000000};
+							store_we_to_dmem = 4'b1100;
+						end
+						default: illegal_insn = 1'b1;
+					endcase
+				else if (insn_sw) begin
+					store_data_to_dmem = rs2_data;
+					store_we_to_dmem = 4'b1111;
+				end
+				else
+					illegal_insn = 1'b1;
+			end
 			OpBranch:
 				if (insn_beq) begin
 					if (rs1_data == rs2_data)
@@ -545,9 +752,6 @@ module DatapathSingleCycle (
 			completed_insn <= insn_from_imem;
 			pcCurrent <= pcNext;
 		end
-	assign addr_to_dmem = 32'b00000000000000000000000000000000;
-	assign store_data_to_dmem = 32'b00000000000000000000000000000000;
-	assign store_we_to_dmem = 4'b0000;
 	initial _sv2v_0 = 0;
 endmodule
 module MemorySingleCycle (
